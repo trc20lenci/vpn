@@ -17,6 +17,7 @@ router = Router(name="subscription")
 SUBSCRIPTION_PHOTO = f"{config.assets_dir}/subscription.jpg"
 DISCOUNT_SECONDS = 60 * 60
 DISCOUNT_RATE = 0.30
+DISCOUNT_COOLDOWN_SECONDS = 24 * 60 * 60  # использовать скидку можно раз в сутки
 
 PLAN_DAYS = {plan_id: days for plan_id, (_, _, days) in PLANS.items()}
 
@@ -56,9 +57,7 @@ async def cb_discount(callback: CallbackQuery):
     user = await db.get_or_create_user(callback.from_user.id, callback.from_user.username)
     now = int(time.time())
 
-    # вкладка всегда закрывается по нажатию — открытый диалог не должен висеть в чате
-    await callback.message.delete()
-
+    # уже активна прямо сейчас
     if user.get("discount_active_until") and user["discount_active_until"] > now:
         remaining_min = max(1, (user["discount_active_until"] - now) // 60)
         await callback.answer(
@@ -66,8 +65,20 @@ async def cb_discount(callback: CallbackQuery):
         )
         return
 
+    # лимит: использовать скидку можно раз в сутки
+    last_claimed = user.get("last_discount_claimed_at")
+    if last_claimed and (now - last_claimed) < DISCOUNT_COOLDOWN_SECONDS:
+        next_available = last_claimed + DISCOUNT_COOLDOWN_SECONDS
+        hours_left = max(1, (next_available - now) // 3600)
+        await callback.answer(
+            f"⏳ Скидку 30% можно использовать раз в сутки. "
+            f"Следующая попытка будет доступна примерно через {hours_left} ч.",
+            show_alert=True,
+        )
+        return
+
     until_ts = now + DISCOUNT_SECONDS
-    await db.set_discount(callback.from_user.id, until_ts)
+    await db.set_discount(callback.from_user.id, until_ts, claimed_at=now)
 
     await callback.message.answer(texts.DISCOUNT_ACTIVATED, reply_markup=back_to_menu_kb())
     await callback.answer()

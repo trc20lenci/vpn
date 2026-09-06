@@ -17,6 +17,7 @@ CREATE TABLE IF NOT EXISTS users (
     subscription_expires_at INTEGER,                         -- unix timestamp, NULL = навсегда
     free_trial_used     INTEGER NOT NULL DEFAULT 0,           -- 0/1
     discount_active_until INTEGER,                            -- unix timestamp окончания скидки 30%
+    last_discount_claimed_at INTEGER,                          -- когда скидка была активирована последний раз (лимит 1 раз в сутки)
     referrer_id         INTEGER,                              -- кто пригласил этого пользователя
     referral_code       TEXT UNIQUE,                          -- собственный промокод пользователя
     created_at          INTEGER NOT NULL
@@ -72,6 +73,11 @@ class Database:
     async def init(self):
         async with aiosqlite.connect(self.path) as db:
             await db.executescript(SCHEMA)
+            # мягкая миграция для БД, созданных до появления этой колонки
+            try:
+                await db.execute("ALTER TABLE users ADD COLUMN last_discount_claimed_at INTEGER")
+            except aiosqlite.OperationalError:
+                pass  # колонка уже существует
             await db.commit()
 
     # ---------- users ----------
@@ -134,10 +140,12 @@ class Database:
             await db.execute("UPDATE users SET free_trial_used = 1 WHERE user_id = ?", (user_id,))
             await db.commit()
 
-    async def set_discount(self, user_id: int, until_ts: int):
+    async def set_discount(self, user_id: int, until_ts: int, claimed_at: int):
         async with aiosqlite.connect(self.path) as db:
-            await db.execute("UPDATE users SET discount_active_until = ? WHERE user_id = ?",
-                              (until_ts, user_id))
+            await db.execute(
+                "UPDATE users SET discount_active_until = ?, last_discount_claimed_at = ? WHERE user_id = ?",
+                (until_ts, claimed_at, user_id),
+            )
             await db.commit()
 
     async def change_balance(self, user_id: int, delta: int):
