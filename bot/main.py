@@ -9,6 +9,7 @@ from aiogram.types import BotCommand
 
 from bot.config import config
 from bot.database import db
+from bot.utils import texts
 
 from bot.handlers import start, free_trial, subscription, balance, referral, support
 
@@ -23,6 +24,16 @@ async def set_commands(bot: Bot):
         BotCommand(command="about", description="ℹ️ О сервисе"),
         BotCommand(command="support", description="🛟 Поддержка"),
     ])
+
+
+async def set_bot_description(bot: Bot):
+    """
+    Описание бота, которое видно ДО нажатия /start — на пустом экране чата
+    (description) и в предпросмотрах/шаринге (short_description).
+    Именно сюда идёт "что умеет бот".
+    """
+    await bot.set_my_description(texts.BOT_FULL_DESCRIPTION)
+    await bot.set_my_short_description(texts.BOT_SHORT_DESCRIPTION)
 
 
 async def main():
@@ -45,6 +56,7 @@ async def main():
 
     await bot.delete_webhook(drop_pending_updates=True)
     await set_commands(bot)
+    await set_bot_description(bot)
     await dp.start_polling(bot)
 
 
