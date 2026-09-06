@@ -1,4 +1,5 @@
 from aiogram import Router, F
+from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Message, FSInputFile
 
@@ -15,16 +16,26 @@ router = Router(name="balance")
 BALANCE_PHOTO = f"{config.assets_dir}/balance.jpg"
 
 
-@router.callback_query(F.data == "balance")
-async def cb_balance(callback: CallbackQuery):
-    user = await db.get_or_create_user(callback.from_user.id, callback.from_user.username)
-    await callback.message.delete()
-    await callback.message.answer_photo(
+async def send_balance_menu(message: Message, user: dict):
+    await message.answer_photo(
         photo=FSInputFile(BALANCE_PHOTO),
         caption=texts.BALANCE_TEXT.format(balance=user["balance"]),
         reply_markup=balance_kb(),
     )
+
+
+@router.callback_query(F.data == "balance")
+async def cb_balance(callback: CallbackQuery):
+    user = await db.get_or_create_user(callback.from_user.id, callback.from_user.username)
+    await callback.message.delete()
+    await send_balance_menu(callback.message, user)
     await callback.answer()
+
+
+@router.message(Command("balance"))
+async def cmd_balance(message: Message):
+    user = await db.get_or_create_user(message.from_user.id, message.from_user.username)
+    await send_balance_menu(message, user)
 
 
 @router.callback_query(F.data == "balance_topup")

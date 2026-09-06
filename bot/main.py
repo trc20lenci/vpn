@@ -5,11 +5,24 @@ from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 from aiogram.fsm.storage.memory import MemoryStorage
+from aiogram.types import BotCommand
 
 from bot.config import config
 from bot.database import db
 
 from bot.handlers import start, free_trial, subscription, balance, referral, support
+
+
+async def set_commands(bot: Bot):
+    """Меню команд слева от поля ввода (кнопка 'Menu' в клиенте Telegram)."""
+    await bot.set_my_commands([
+        BotCommand(command="start", description="🏠 Главное меню"),
+        BotCommand(command="subscription", description="🪙 Купить подписку"),
+        BotCommand(command="balance", description="💰 Баланс"),
+        BotCommand(command="referral", description="🤝 50₽ за друга"),
+        BotCommand(command="about", description="ℹ️ О сервисе"),
+        BotCommand(command="support", description="🛟 Поддержка"),
+    ])
 
 
 async def main():
@@ -31,6 +44,7 @@ async def main():
     dp.include_router(support.router)
 
     await bot.delete_webhook(drop_pending_updates=True)
+    await set_commands(bot)
     await dp.start_polling(bot)
 
 

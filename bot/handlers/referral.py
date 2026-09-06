@@ -14,7 +14,8 @@
 subscription.py (после успешной оплаты платной подписки).
 """
 from aiogram import Router, F
-from aiogram.types import CallbackQuery
+from aiogram.filters import Command
+from aiogram.types import CallbackQuery, Message
 
 from bot.config import config
 from bot.database import db
@@ -51,14 +52,9 @@ async def complete_referral_if_eligible(referred_user_id: int) -> None:
         await db.add_tickets(grand_referrer["referrer_id"], config.referral_mutual_tickets)
 
 
-@router.callback_query(F.data == "referral")
-async def cb_referral(callback: CallbackQuery):
-    user_id = callback.from_user.id
-    await db.get_or_create_user(user_id, callback.from_user.username)
-
+async def render_referral_text(user_id: int) -> tuple[str, str]:
     stats = await db.get_referral_stats(user_id)
     ref_link = build_ref_link(user_id)
-
     text = texts.REFERRAL_INFO.format(
         invited_total=stats["invited_total"],
         completed_count=stats["completed_count"],
@@ -67,10 +63,28 @@ async def cb_referral(callback: CallbackQuery):
         rub_earned=stats["rub_earned"],
         ref_link=ref_link,
     )
+    return text, ref_link
+
+
+@router.callback_query(F.data == "referral")
+async def cb_referral(callback: CallbackQuery):
+    user_id = callback.from_user.id
+    await db.get_or_create_user(user_id, callback.from_user.username)
+
+    text, ref_link = await render_referral_text(user_id)
 
     await callback.message.delete()
     await callback.message.answer(text, reply_markup=referral_kb(ref_link))
     await callback.answer()
+
+
+@router.message(Command("referral"))
+async def cmd_referral(message: Message):
+    user_id = message.from_user.id
+    await db.get_or_create_user(user_id, message.from_user.username)
+
+    text, ref_link = await render_referral_text(user_id)
+    await message.answer(text, reply_markup=referral_kb(ref_link))
 
 
 @router.callback_query(F.data == "ref_copy_link")

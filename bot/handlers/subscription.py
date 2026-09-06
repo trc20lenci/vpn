@@ -1,7 +1,8 @@
 import time
 from aiogram import Router, F
+from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
-from aiogram.types import CallbackQuery, FSInputFile
+from aiogram.types import CallbackQuery, Message, FSInputFile
 
 from bot.config import config
 from bot.database import db
@@ -28,16 +29,26 @@ def _price_for(user: dict, plan_id: str) -> int:
     return base_price
 
 
-@router.callback_query(F.data == "subscription")
-async def cb_subscription(callback: CallbackQuery):
-    await db.get_or_create_user(callback.from_user.id, callback.from_user.username)
-    await callback.message.delete()
-    await callback.message.answer_photo(
+async def send_subscription_menu(message: Message):
+    await message.answer_photo(
         photo=FSInputFile(SUBSCRIPTION_PHOTO),
         caption=texts.SUBSCRIPTION_TEXT,
         reply_markup=subscription_kb(),
     )
+
+
+@router.callback_query(F.data == "subscription")
+async def cb_subscription(callback: CallbackQuery):
+    await db.get_or_create_user(callback.from_user.id, callback.from_user.username)
+    await callback.message.delete()
+    await send_subscription_menu(callback.message)
     await callback.answer()
+
+
+@router.message(Command("subscription"))
+async def cmd_subscription(message: Message):
+    await db.get_or_create_user(message.from_user.id, message.from_user.username)
+    await send_subscription_menu(message)
 
 
 @router.callback_query(F.data == "discount")
@@ -45,8 +56,11 @@ async def cb_discount(callback: CallbackQuery):
     user = await db.get_or_create_user(callback.from_user.id, callback.from_user.username)
     now = int(time.time())
 
+    # вкладка всегда закрывается по нажатию — открытый диалог не должен висеть в чате
+    await callback.message.delete()
+
     if user.get("discount_active_until") and user["discount_active_until"] > now:
-        remaining_min = (user["discount_active_until"] - now) // 60
+        remaining_min = max(1, (user["discount_active_until"] - now) // 60)
         await callback.answer(
             texts.DISCOUNT_ALREADY_ACTIVE.format(time=f"{remaining_min} мин"), show_alert=True
         )

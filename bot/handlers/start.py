@@ -1,6 +1,6 @@
 import time
 from aiogram import Router, F
-from aiogram.filters import CommandStart, CommandObject
+from aiogram.filters import CommandStart, CommandObject, Command
 from aiogram.types import Message, CallbackQuery, FSInputFile
 
 from bot.config import config
@@ -30,6 +30,26 @@ def render_main_menu_text(user: dict, username_display: str) -> str:
     )
 
 
+def discount_minutes_left(user: dict) -> int | None:
+    """Сколько минут осталось действовать скидке 30%, либо None если не активна."""
+    until = user.get("discount_active_until")
+    if not until:
+        return None
+    now = int(time.time())
+    if until <= now:
+        return None
+    return max(1, (until - now) // 60)
+
+
+async def send_main_menu(message: Message, user: dict, username_display: str):
+    text = render_main_menu_text(user, username_display)
+    await message.answer_photo(
+        photo=FSInputFile(START_PHOTO),
+        caption=text,
+        reply_markup=main_menu_kb(discount_minutes_left(user)),
+    )
+
+
 @router.message(CommandStart())
 async def cmd_start(message: Message, command: CommandObject):
     """Обрабатывает /start и /start ref<ID> (реферальная ссылка)."""
@@ -48,13 +68,7 @@ async def cmd_start(message: Message, command: CommandObject):
     )
 
     username_display = f"@{message.from_user.username}" if message.from_user.username else message.from_user.full_name
-    text = render_main_menu_text(user, username_display)
-
-    await message.answer_photo(
-        photo=FSInputFile(START_PHOTO),
-        caption=text,
-        reply_markup=main_menu_kb(),
-    )
+    await send_main_menu(message, user, username_display)
 
 
 @router.callback_query(F.data == "main_menu")
@@ -64,24 +78,29 @@ async def cb_main_menu(callback: CallbackQuery):
         user = await db.get_or_create_user(callback.from_user.id, callback.from_user.username)
 
     username_display = f"@{callback.from_user.username}" if callback.from_user.username else callback.from_user.full_name
-    text = render_main_menu_text(user, username_display)
 
     # главное меню всегда с фото — проще прислать новое сообщение, чем редактировать text<->photo
     await callback.message.delete()
-    await callback.message.answer_photo(
-        photo=FSInputFile(START_PHOTO),
-        caption=text,
-        reply_markup=main_menu_kb(),
-    )
+    await send_main_menu(callback.message, user, username_display)
     await callback.answer()
+
+
+async def send_about(message: Message):
+    await message.answer_photo(
+        photo=FSInputFile(ABOUT_PHOTO),
+        caption=texts.ABOUT_TEXT,
+        reply_markup=back_to_menu_kb(),
+    )
 
 
 @router.callback_query(F.data == "about")
 async def cb_about(callback: CallbackQuery):
     await callback.message.delete()
-    await callback.message.answer_photo(
-        photo=FSInputFile(ABOUT_PHOTO),
-        caption=texts.ABOUT_TEXT,
-        reply_markup=back_to_menu_kb(),
-    )
+    await send_about(callback.message)
     await callback.answer()
+
+
+@router.message(Command("about"))
+async def cmd_about(message: Message):
+    await db.get_or_create_user(message.from_user.id, message.from_user.username)
+    await send_about(message)
