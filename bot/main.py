@@ -11,7 +11,7 @@ from bot.config import config
 from bot.database import db
 from bot.utils import texts
 
-from bot.handlers import start, free_trial, subscription, balance, referral, support
+from bot.handlers import start, free_trial, subscription, balance, referral, support, admin_stats
 
 
 async def set_commands(bot: Bot):
@@ -40,6 +40,7 @@ async def main():
     logging.basicConfig(level=logging.INFO)
 
     await db.init()
+    await db.ensure_default_server_from_config()
 
     bot = Bot(
         token=config.bot_token,
@@ -53,6 +54,7 @@ async def main():
     dp.include_router(balance.router)
     dp.include_router(referral.router)
     dp.include_router(support.router)
+    dp.include_router(admin_stats.router)
 
     await bot.delete_webhook(drop_pending_updates=True)
     await set_commands(bot)

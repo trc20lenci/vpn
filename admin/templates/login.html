@@ -1,0 +1,16 @@
+{% extends "base.html" %}
+{% block title %}Вход — Ai VPN Admin{% endblock %}
+{% block content %}
+<div style="max-width:360px; margin:80px auto;">
+  <h1>Ai VPN Admin</h1>
+  <p class="subtitle">Вход только для администраторов</p>
+  <div class="card">
+    {% if error %}<div class="error">{{ error }}</div>{% endif %}
+    <form method="post">
+      <input type="text" name="username" placeholder="Логин" autocomplete="username" required>
+      <input type="password" name="password" placeholder="Пароль" autocomplete="current-password" required>
+      <button type="submit" class="btn-primary" style="width:100%; padding:10px;">Войти</button>
+    </form>
+  </div>
+</div>
+{% endblock %}

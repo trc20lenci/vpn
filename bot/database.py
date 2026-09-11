@@ -18,6 +18,7 @@ CREATE TABLE IF NOT EXISTS users (
     free_trial_used     INTEGER NOT NULL DEFAULT 0,           -- 0/1
     discount_active_until INTEGER,                            -- unix timestamp окончания скидки 30%
     last_discount_claimed_at INTEGER,                          -- когда скидка была активирована последний раз (лимит 1 раз в сутки)
+    hub_token            TEXT UNIQUE,                          -- токен для агрегированной sub-ссылки /sub/<token>
     referrer_id         INTEGER,                              -- кто пригласил этого пользователя
     referral_code       TEXT UNIQUE,                          -- собственный промокод пользователя
     created_at          INTEGER NOT NULL
@@ -63,6 +64,35 @@ CREATE TABLE IF NOT EXISTS ticket_messages (
     created_at  INTEGER NOT NULL,
     FOREIGN KEY (ticket_id) REFERENCES tickets(ticket_id)
 );
+
+CREATE TABLE IF NOT EXISTS servers (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    name            TEXT NOT NULL,             -- напр. "🇩🇪 Germany Premium" — так видит пользователь в клиенте
+    xui_api_url     TEXT NOT NULL,             -- https://1.2.3.4:54321/panelpath
+    xui_username    TEXT NOT NULL,
+    xui_password    TEXT NOT NULL,
+    inbound_id      INTEGER NOT NULL DEFAULT 1,   -- Inbound 1 = VLESS + Reality
+    connect_host    TEXT NOT NULL,             -- домен/ip, на который подключается клиент
+    connect_port    INTEGER NOT NULL DEFAULT 443,
+    public_key      TEXT NOT NULL,             -- Reality pbk
+    short_id        TEXT NOT NULL,             -- Reality sid
+    sni             TEXT NOT NULL,             -- Reality server_name
+    is_active       INTEGER NOT NULL DEFAULT 1,
+    created_at      INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS vpn_clients (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id         INTEGER NOT NULL,
+    server_id       INTEGER NOT NULL,
+    xui_uuid        TEXT NOT NULL,             -- client id (uuid) в 3x-ui
+    xui_email       TEXT NOT NULL,             -- уникальный "email" клиента в 3x-ui
+    expiry_time_ms  INTEGER,                    -- unix ms; 0 = без ограничения ("навсегда")
+    enabled         INTEGER NOT NULL DEFAULT 1,
+    created_at      INTEGER NOT NULL,
+    updated_at      INTEGER NOT NULL,
+    UNIQUE(user_id, server_id)
+);
 """
 
 
@@ -73,11 +103,15 @@ class Database:
     async def init(self):
         async with aiosqlite.connect(self.path) as db:
             await db.executescript(SCHEMA)
-            # мягкая миграция для БД, созданных до появления этой колонки
-            try:
-                await db.execute("ALTER TABLE users ADD COLUMN last_discount_claimed_at INTEGER")
-            except aiosqlite.OperationalError:
-                pass  # колонка уже существует
+            # мягкая миграция для БД, созданных до появления этих колонок
+            for ddl in (
+                "ALTER TABLE users ADD COLUMN last_discount_claimed_at INTEGER",
+                "ALTER TABLE users ADD COLUMN hub_token TEXT",
+            ):
+                try:
+                    await db.execute(ddl)
+                except aiosqlite.OperationalError:
+                    pass  # колонка уже существует
             await db.commit()
 
     # ---------- users ----------
@@ -245,6 +279,13 @@ class Database:
             )
             return [dict(r) for r in await cur.fetchall()]
 
+    async def get_payment_history_all(self) -> list[dict]:
+        """Для статистики /stats и дашборда — все платежи всех пользователей."""
+        async with aiosqlite.connect(self.path) as db:
+            db.row_factory = aiosqlite.Row
+            cur = await db.execute("SELECT * FROM payments")
+            return [dict(r) for r in await cur.fetchall()]
+
     # ---------- tickets ----------
 
     async def create_ticket(self, user_id: int, subject: str, message: str) -> int:
@@ -265,6 +306,129 @@ class Database:
                 "SELECT * FROM tickets WHERE user_id = ? ORDER BY created_at DESC",
                 (user_id,),
             )
+            return [dict(r) for r in await cur.fetchall()]
+
+    # ---------- hub token (sub-ссылка) ----------
+
+    async def get_or_create_hub_token(self, user_id: int) -> str:
+        user = await self.get_user(user_id)
+        if user and user.get("hub_token"):
+            return user["hub_token"]
+
+        import secrets
+        token = secrets.token_urlsafe(24)
+        async with aiosqlite.connect(self.path) as db:
+            await db.execute("UPDATE users SET hub_token = ? WHERE user_id = ?", (token, user_id))
+            await db.commit()
+        return token
+
+    async def get_user_id_by_hub_token(self, token: str) -> int | None:
+        async with aiosqlite.connect(self.path) as db:
+            cur = await db.execute("SELECT user_id FROM users WHERE hub_token = ?", (token,))
+            row = await cur.fetchone()
+            return row[0] if row else None
+
+    # ---------- servers (3X-UI ноды) ----------
+
+    async def get_active_servers(self) -> list[dict]:
+        async with aiosqlite.connect(self.path) as db:
+            db.row_factory = aiosqlite.Row
+            cur = await db.execute("SELECT * FROM servers WHERE is_active = 1 ORDER BY id")
+            return [dict(r) for r in await cur.fetchall()]
+
+    async def get_all_servers(self) -> list[dict]:
+        async with aiosqlite.connect(self.path) as db:
+            db.row_factory = aiosqlite.Row
+            cur = await db.execute("SELECT * FROM servers ORDER BY id")
+            return [dict(r) for r in await cur.fetchall()]
+
+    async def add_server(self, **fields) -> int:
+        now = int(time.time())
+        cols = list(fields.keys()) + ["created_at"]
+        vals = list(fields.values()) + [now]
+        placeholders = ", ".join("?" for _ in cols)
+        async with aiosqlite.connect(self.path) as db:
+            cur = await db.execute(
+                f"INSERT INTO servers ({', '.join(cols)}) VALUES ({placeholders})", vals
+            )
+            await db.commit()
+            return cur.lastrowid
+
+    async def ensure_default_server_from_config(self):
+        """Если таблица servers пустая, засеивает сервер №1 из переменных окружения XUI_*."""
+        from bot.config import config
+        servers = await self.get_all_servers()
+        if servers or not config.xui_api_url:
+            return
+        await self.add_server(
+            name=config.xui_server_label,
+            xui_api_url=config.xui_api_url,
+            xui_username=config.xui_username,
+            xui_password=config.xui_password,
+            inbound_id=config.xui_inbound_id,
+            connect_host=config.xui_connect_host,
+            connect_port=config.xui_connect_port,
+            public_key=config.xui_public_key,
+            short_id=config.xui_short_id,
+            sni=config.xui_sni,
+            is_active=1,
+        )
+
+    # ---------- vpn_clients (клиенты пользователя на конкретных серверах) ----------
+
+    async def get_vpn_client(self, user_id: int, server_id: int) -> dict | None:
+        async with aiosqlite.connect(self.path) as db:
+            db.row_factory = aiosqlite.Row
+            cur = await db.execute(
+                "SELECT * FROM vpn_clients WHERE user_id = ? AND server_id = ?",
+                (user_id, server_id),
+            )
+            row = await cur.fetchone()
+            return dict(row) if row else None
+
+    async def get_vpn_clients(self, user_id: int) -> list[dict]:
+        async with aiosqlite.connect(self.path) as db:
+            db.row_factory = aiosqlite.Row
+            cur = await db.execute("SELECT * FROM vpn_clients WHERE user_id = ?", (user_id,))
+            return [dict(r) for r in await cur.fetchall()]
+
+    async def upsert_vpn_client(self, user_id: int, server_id: int, xui_uuid: str,
+                                 xui_email: str, expiry_time_ms: int, enabled: bool = True):
+        now = int(time.time())
+        async with aiosqlite.connect(self.path) as db:
+            await db.execute(
+                """INSERT INTO vpn_clients (user_id, server_id, xui_uuid, xui_email,
+                       expiry_time_ms, enabled, created_at, updated_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                   ON CONFLICT(user_id, server_id) DO UPDATE SET
+                       xui_uuid = excluded.xui_uuid,
+                       xui_email = excluded.xui_email,
+                       expiry_time_ms = excluded.expiry_time_ms,
+                       enabled = excluded.enabled,
+                       updated_at = excluded.updated_at""",
+                (user_id, server_id, xui_uuid, xui_email, expiry_time_ms, int(enabled), now, now),
+            )
+            await db.commit()
+
+    async def set_vpn_clients_enabled(self, user_id: int, enabled: bool):
+        async with aiosqlite.connect(self.path) as db:
+            await db.execute(
+                "UPDATE vpn_clients SET enabled = ?, updated_at = ? WHERE user_id = ?",
+                (int(enabled), int(time.time()), user_id),
+            )
+            await db.commit()
+
+    async def delete_vpn_clients(self, user_id: int):
+        async with aiosqlite.connect(self.path) as db:
+            await db.execute("DELETE FROM vpn_clients WHERE user_id = ?", (user_id,))
+            await db.commit()
+
+    # ---------- admin dashboard ----------
+
+    async def get_all_users_admin(self) -> list[dict]:
+        async with aiosqlite.connect(self.path) as db:
+            db.row_factory = aiosqlite.Row
+            cur = await db.execute("SELECT * FROM users ORDER BY created_at DESC")
             return [dict(r) for r in await cur.fetchall()]
 
 
